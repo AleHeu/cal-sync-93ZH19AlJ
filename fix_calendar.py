@@ -12,6 +12,14 @@ OUTPUT_FILE = "fixed.ics"
 LOCAL_TZ = ZoneInfo("Europe/Berlin")
 
 
+def convert_to_utc(dt):
+    """Wandelt ein datetime (tz-aware oder floating) sicher nach UTC um."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc), "tz vorhanden -> normalisiert"
+    dt_local = dt.replace(tzinfo=LOCAL_TZ)
+    return dt_local.astimezone(timezone.utc), "FLOATING (ohne TZ) -> als Europe/Berlin angenommen"
+
+
 def main():
     resp = requests.get(ICS_URL, timeout=30)
     resp.raise_for_status()
@@ -21,31 +29,29 @@ def main():
 
     for component in cal.walk("VEVENT"):
         summary = str(component.get("SUMMARY", "(ohne Titel)"))
+
+        # DTSTART und DTEND korrigieren
         for field in ("DTSTART", "DTEND"):
             if field not in component:
                 continue
             dt = component[field].dt
-
-            # Ganztägige Termine (nur Datum, keine Uhrzeit) unangetastet lassen
             if not isinstance(dt, datetime):
-                continue
-
+                continue  # ganztägige Termine unangetastet lassen
             original = dt.isoformat()
-
-            if dt.tzinfo is not None:
-                # Hat schon eine Zeitzone (egal ob TZID oder bereits UTC) -> sauber nach UTC
-                dt_utc = dt.astimezone(timezone.utc)
-                status = "tz vorhanden -> normalisiert"
-            else:
-                # Floating time: keine Zeitzone angegeben -> als Europe/Berlin annehmen
-                dt_local = dt.replace(tzinfo=LOCAL_TZ)
-                dt_utc = dt_local.astimezone(timezone.utc)
-                status = "FLOATING (ohne TZ) -> als Europe/Berlin angenommen"
-
+            dt_utc, status = convert_to_utc(dt)
             del component[field]
             component.add(field, dt_utc)
-
             report.append(f"[{status}] {summary} | {field}: {original} -> {dt_utc.isoformat()}")
+
+        # RECURRENCE-ID korrigieren (wichtig für verschobene Einzeltermine einer Serie!)
+        if "RECURRENCE-ID" in component:
+            dt = component["RECURRENCE-ID"].dt
+            if isinstance(dt, datetime):
+                original = dt.isoformat()
+                dt_utc, status = convert_to_utc(dt)
+                del component["RECURRENCE-ID"]
+                component.add("RECURRENCE-ID", dt_utc)
+                report.append(f"[{status}] {summary} | RECURRENCE-ID: {original} -> {dt_utc.isoformat()}")
 
     # Nicht mehr benötigte VTIMEZONE-Blöcke entfernen
     cal.subcomponents = [c for c in cal.subcomponents if c.name != "VTIMEZONE"]
